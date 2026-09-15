@@ -12,9 +12,21 @@ import pandas as pd
 import streamlit as st
 
 import kobo_client as kc
-from reports import MESES, SECCION_INFORME, filtrar_envios, generar_informe, generar_listado, indexar_participantes, indexar_promotores, registro_nuevos_miembros
+from reports import MESES, PLANTILLAS, SECCION_INFORME, filtrar_envios, generar_informe, generar_listado, indexar_participantes, indexar_promotores, registro_nuevos_miembros
 
 st.set_page_config(page_title="Reportes MAGA Totonicapán", page_icon="🌽", layout="centered")
+
+TODO_DEPTO = "__todo_el_departamento__"
+
+faltantes = [f for f in ("plantilla_listado.xlsx", "plantilla_informe.xlsx") if not (PLANTILLAS / f).exists()]
+if faltantes:
+    st.error(
+        "No se encontraron las plantillas de Excel: "
+        + ", ".join(f"`plantillas/{f}`" for f in faltantes)
+        + ". La carpeta **plantillas** (con sus dos archivos .xlsx) debe estar "
+        "junto a `app.py` — si la app está en Streamlit Cloud, súbala al repositorio de GitHub."
+    )
+    st.stop()
 
 
 def get_token():
@@ -64,7 +76,11 @@ municipio_labels = {code: label for code, label in sorted(municipios.items(), ke
 st.header("1. Elija el municipio y el mes")
 col1, col2, col3 = st.columns([2, 1, 1])
 with col1:
-    municipio_code = st.selectbox("Municipio", options=list(municipio_labels), format_func=lambda c: municipio_labels[c])
+    municipio_code = st.selectbox(
+        "Municipio",
+        options=list(municipio_labels) + [TODO_DEPTO],
+        format_func=lambda c: "🏛️ Todo el departamento" if c == TODO_DEPTO else municipio_labels[c],
+    )
 with col2:
     hoy = date.today()
     mes = st.selectbox("Mes", options=list(range(1, 13)), index=hoy.month - 1, format_func=lambda m: MESES[m - 1])
@@ -93,16 +109,18 @@ if st.button("Generar reportes", type="primary", disabled=not (hacer_listado or 
         else:
             participantes_df = pd.read_excel(archivo_participantes, dtype=str)
 
-    envios = filtrar_envios(submissions, municipio_code, mes, anio)
+    todo_depto = municipio_code == TODO_DEPTO
+    envios = filtrar_envios(submissions, None if todo_depto else municipio_code, mes, anio)
     nombre_mes = MESES[mes - 1]
-    etiqueta_muni = municipio_labels[municipio_code]
+    etiqueta_muni = "todo el departamento" if todo_depto else municipio_labels[municipio_code]
 
     if not envios:
         st.warning(f"No se encontraron envíos de **{etiqueta_muni}** en **{nombre_mes} {anio}**. Revise el municipio, el mes y que las boletas ya estén enviadas en Kobo.")
         st.stop()
 
     st.success(f"Se encontraron **{len(envios)}** boletas de **{etiqueta_muni}** en **{nombre_mes} {anio}**.")
-    sufijo = f"{etiqueta_muni.replace(' ', '_')}_{nombre_mes}_{anio}"
+    base_nombre = "Departamento_Totonicapan" if todo_depto else etiqueta_muni.replace(" ", "_")
+    sufijo = f"{base_nombre}_{nombre_mes}_{anio}"
 
     if hacer_listado:
         with st.spinner("Generando listado de beneficiarios..."):
@@ -128,10 +146,15 @@ if st.button("Generar reportes", type="primary", disabled=not (hacer_listado or 
     if hacer_informe:
         with st.spinner("Generando informe mensual..."):
             promotores_idx = indexar_promotores(promotores_df)
-            informe_bytes, resumen = generar_informe(envios, promotores_idx, choice_maps, field_lists, municipio_code, mes, anio)
+            informe_bytes, resumen = generar_informe(
+                envios, promotores_idx, choice_maps, field_lists,
+                None if todo_depto else municipio_code, mes, anio,
+            )
         st.subheader("📊 Informe Mensual")
         if resumen["eventos"] == 0:
             st.warning("Ninguna boleta de este mes tiene la sección de informe llenada (pregunta 'informe' = Sí). El archivo saldrá con la sección vacía.")
+        elif todo_depto:
+            st.markdown(f"**{resumen['eventos']}** eventos en las secciones de todos los municipios")
         else:
             st.markdown(f"**{resumen['eventos']}** eventos en la sección de **{etiqueta_muni}**")
         for adv in resumen["advertencias"]:
