@@ -81,8 +81,9 @@ def _parse_fecha(sub):
 
 
 def filtrar_envios(submissions, municipio_code, mes, anio):
-    """Envíos del municipio y mes/año elegidos (mes 1-12)."""
-    muni_slug = _slug(municipio_code)
+    """Envíos del municipio y mes/año elegidos (mes 1-12).
+    Con municipio_code=None se incluyen todos los municipios."""
+    muni_slug = _slug(municipio_code) if municipio_code else None
     out = []
     for sub in submissions:
         f = _parse_fecha(sub)
@@ -90,7 +91,7 @@ def filtrar_envios(submissions, municipio_code, mes, anio):
             continue
         # _slug también cubre datos de versiones viejas que traían la etiqueta
         # ("San Cristóbal Totonicapán") en vez del código
-        if _slug(sub.get("municipio")) != muni_slug:
+        if muni_slug and _slug(sub.get("municipio")) != muni_slug:
             continue
         out.append(sub)
     return out
@@ -212,7 +213,7 @@ def generar_listado(envios, participantes_idx, nuevos_idx, choice_maps, field_li
         ws["P5"] = anio
         ws["O1"] = f"Fecha de reporte: {date.today().strftime('%d/%m/%Y')}"
         fila = 8
-        for cui, b in sorted(personas.items()):
+        for cui, b in sorted(personas.items(), key=lambda kv: (kv[1]["municipio"], kv[0])):
             datos = participantes_idx.get(cui) or nuevos_idx.get(cui)
             if datos is None:
                 datos = {}
@@ -246,59 +247,75 @@ def generar_listado(envios, participantes_idx, nuevos_idx, choice_maps, field_li
     return buf.getvalue(), resumen
 
 
-def generar_informe(envios, promotores_idx, choice_maps, field_lists, municipio_code, mes, anio):
-    """Llena la plantilla del informe mensual (sección del municipio elegido).
-    Devuelve (bytes, resumen)."""
-    seccion = SECCION_INFORME.get(_slug(municipio_code))
-    if seccion is None:
-        raise ValueError(f"Municipio no reconocido: {municipio_code}")
+def _llenar_evento(ws, fila, n, sub, promotores_idx, choice_maps, field_lists):
+    comunidad = label_for(choice_maps, field_lists, "comunidad", sub.get("comunidad"))
+    municipio = label_for(choice_maps, field_lists, "municipio", sub.get("municipio"))
+    fecha_texto = _clean(sub.get("fecha_diferente"))
+    if not fecha_texto:
+        f = _parse_fecha(sub)
+        fecha_texto = f.strftime("%d/%m/%Y") if f else ""
+    ws.cell(fila, 1).value = n
+    ws.cell(fila, 2).value = _clean(sub.get("nombre_evento"))
+    ws.cell(fila, 3).value = fecha_texto
+    ws.cell(fila, 4).value = ", ".join(p for p in (comunidad, municipio) if p)
+    ws.cell(fila, 5).value = _to_int(sub.get("duracion"))
+    ws.cell(fila, 6).value = promotores_idx.get(_slug(sub.get("cader_id")), "")
+    ws.cell(fila, 7).value = _to_int(sub.get("telefono_promotor")) or _clean(sub.get("telefono_promotor"))
+    ws.cell(fila, 8).value = _clean(sub.get("nombre_capacitador"))
+    col_x = ORIENTACION_COL.get(_slug(sub.get("orientacion")))
+    if col_x:
+        ws.cell(fila, col_x).value = "X"
+    ws.cell(fila, 17).value = _to_int(sub.get("h_promotores")) or 0
+    ws.cell(fila, 18).value = _to_int(sub.get("m_promotores")) or 0
+    ws.cell(fila, 19).value = _to_int(sub.get("otros_part_h")) or 0
+    ws.cell(fila, 20).value = _to_int(sub.get("otros_part_m")) or 0
+    ws.cell(fila, 23).value = _clean(sub.get("institucion"))
+    ws.cell(fila, 24).value = _to_int(sub.get("costo"))
+    verificacion = {_slug(v) for v in _clean(sub.get("verificacion")).split()}
+    ws.cell(fila, 25).value = "X" if "fotos" in verificacion else None
+    ws.cell(fila, 26).value = "X" if "listados" in verificacion else None
+    ws.cell(fila, 27).value = "X" if "otros" in verificacion else None
+    ws.cell(fila, 28).value = _clean(sub.get("observaciones"))
 
-    eventos = [s for s in envios if _slug(s.get("informe")) == "si"]
-    eventos.sort(key=lambda s: (_parse_fecha(s) or date.min))
-    advertencias = []
-    if len(eventos) > 10:
-        advertencias.append(
-            f"Hay {len(eventos)} eventos con informe este mes, pero la plantilla solo tiene "
-            f"10 filas por municipio. Se incluyeron los primeros 10 (por fecha)."
-        )
+
+def generar_informe(envios, promotores_idx, choice_maps, field_lists, municipio_code, mes, anio):
+    """Llena la plantilla del informe mensual. Con un municipio llena solo su
+    sección; con municipio_code=None llena las secciones de todos los
+    municipios que tengan eventos. Devuelve (bytes, resumen)."""
+    if municipio_code is None:
+        munis = list(SECCION_INFORME)
+        encabezado = "TODO EL DEPARTAMENTO"
+    else:
+        muni_slug = _slug(municipio_code)
+        if muni_slug not in SECCION_INFORME:
+            raise ValueError(f"Municipio no reconocido: {municipio_code}")
+        munis = [muni_slug]
+        encabezado = label_for(choice_maps, field_lists, "municipio", municipio_code).upper()
 
     wb = openpyxl.load_workbook(PLANTILLAS / "plantilla_informe.xlsx")
     ws = wb["FORMATO DE CAPACITACIONES 2026"]
-    municipio_label = label_for(choice_maps, field_lists, "municipio", municipio_code)
     ws.cell(6, 6).value = MESES[mes - 1].upper()
-    ws.cell(6, 17).value = municipio_label.upper()
+    ws.cell(6, 17).value = encabezado
 
-    for n, sub in enumerate(eventos[:10], start=1):
-        fila = seccion + n
-        comunidad = label_for(choice_maps, field_lists, "comunidad", sub.get("comunidad"))
-        fecha_texto = _clean(sub.get("fecha_diferente"))
-        if not fecha_texto:
-            f = _parse_fecha(sub)
-            fecha_texto = f.strftime("%d/%m/%Y") if f else ""
-        ws.cell(fila, 1).value = n
-        ws.cell(fila, 2).value = _clean(sub.get("nombre_evento"))
-        ws.cell(fila, 3).value = fecha_texto
-        ws.cell(fila, 4).value = ", ".join(p for p in (comunidad, municipio_label) if p)
-        ws.cell(fila, 5).value = _to_int(sub.get("duracion"))
-        ws.cell(fila, 6).value = promotores_idx.get(_slug(sub.get("cader_id")), "")
-        ws.cell(fila, 7).value = _to_int(sub.get("telefono_promotor")) or _clean(sub.get("telefono_promotor"))
-        ws.cell(fila, 8).value = _clean(sub.get("nombre_capacitador"))
-        col_x = ORIENTACION_COL.get(_slug(sub.get("orientacion")))
-        if col_x:
-            ws.cell(fila, col_x).value = "X"
-        ws.cell(fila, 17).value = _to_int(sub.get("h_promotores")) or 0
-        ws.cell(fila, 18).value = _to_int(sub.get("m_promotores")) or 0
-        ws.cell(fila, 19).value = _to_int(sub.get("otros_part_h")) or 0
-        ws.cell(fila, 20).value = _to_int(sub.get("otros_part_m")) or 0
-        ws.cell(fila, 23).value = _clean(sub.get("institucion"))
-        ws.cell(fila, 24).value = _to_int(sub.get("costo"))
-        verificacion = {_slug(v) for v in _clean(sub.get("verificacion")).split()}
-        ws.cell(fila, 25).value = "X" if "fotos" in verificacion else None
-        ws.cell(fila, 26).value = "X" if "listados" in verificacion else None
-        ws.cell(fila, 27).value = "X" if "otros" in verificacion else None
-        ws.cell(fila, 28).value = _clean(sub.get("observaciones"))
+    total = 0
+    advertencias = []
+    for muni in munis:
+        eventos = [
+            s for s in envios
+            if _slug(s.get("informe")) == "si" and _slug(s.get("municipio")) == muni
+        ]
+        eventos.sort(key=lambda s: (_parse_fecha(s) or date.min))
+        if len(eventos) > 10:
+            etiqueta = label_for(choice_maps, field_lists, "municipio", muni)
+            advertencias.append(
+                f"{etiqueta} tiene {len(eventos)} eventos con informe este mes, pero la "
+                f"plantilla solo tiene 10 filas por municipio. Se incluyeron los primeros 10 (por fecha)."
+            )
+        for n, sub in enumerate(eventos[:10], start=1):
+            _llenar_evento(ws, SECCION_INFORME[muni] + n, n, sub, promotores_idx, choice_maps, field_lists)
+        total += min(len(eventos), 10)
 
     buf = io.BytesIO()
     wb.save(buf)
-    resumen = {"eventos": min(len(eventos), 10), "advertencias": advertencias}
+    resumen = {"eventos": total, "advertencias": advertencias}
     return buf.getvalue(), resumen
