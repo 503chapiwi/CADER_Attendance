@@ -17,6 +17,7 @@ from reports import MESES, PLANTILLAS, SECCION_INFORME, filtrar_envios, generar_
 st.set_page_config(page_title="Reportes MAGA Totonicapán", page_icon="🌽", layout="centered")
 
 TODO_DEPTO = "__todo_el_departamento__"
+MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 faltantes = [f for f in ("plantilla_listado.xlsx", "plantilla_informe.xlsx") if not (PLANTILLAS / f).exists()]
 if faltantes:
@@ -102,6 +103,9 @@ with st.expander("Opciones avanzadas"):
         st.cache_data.clear()
         st.rerun()
 
+# La generación guarda todo en session_state y la sección de resultados se
+# dibuja a partir de ahí: así los dos botones de descarga siguen visibles
+# aunque descargar uno provoque que la página se vuelva a ejecutar.
 if st.button("Generar reportes", type="primary", disabled=not (hacer_listado or hacer_informe)):
     if archivo_participantes is not None:
         if archivo_participantes.name.lower().endswith(".csv"):
@@ -113,55 +117,83 @@ if st.button("Generar reportes", type="primary", disabled=not (hacer_listado or 
     envios = filtrar_envios(submissions, None if todo_depto else municipio_code, mes, anio)
     nombre_mes = MESES[mes - 1]
     etiqueta_muni = "todo el departamento" if todo_depto else municipio_labels[municipio_code]
-
-    if not envios:
-        st.warning(f"No se encontraron envíos de **{etiqueta_muni}** en **{nombre_mes} {anio}**. Revise el municipio, el mes y que las boletas ya estén enviadas en Kobo.")
-        st.stop()
-
-    st.success(f"Se encontraron **{len(envios)}** boletas de **{etiqueta_muni}** en **{nombre_mes} {anio}**.")
     base_nombre = "Departamento_Totonicapan" if todo_depto else etiqueta_muni.replace(" ", "_")
-    sufijo = f"{base_nombre}_{nombre_mes}_{anio}"
 
-    if hacer_listado:
-        with st.spinner("Generando listado de beneficiarios..."):
-            participantes_idx = indexar_participantes(participantes_df)
-            nuevos_idx = registro_nuevos_miembros(submissions)
-            listado_bytes, resumen = generar_listado(envios, participantes_idx, nuevos_idx, choice_maps, field_lists, mes, anio)
-        st.subheader("📋 Listado de Beneficiarios")
-        detalle = " · ".join(f"{hoja}: {n}" for hoja, n in resumen["por_hoja"].items())
-        st.markdown(f"**{resumen['beneficiarios']}** beneficiarios en **{resumen['eventos']}** eventos ({detalle})")
-        if resumen["sin_datos"]:
-            st.warning(
-                f"⚠️ {len(resumen['sin_datos'])} CUI(s) no aparecen en la base de participantes. "
-                "Salen en el listado solo con su CUI; complete sus datos a mano o actualice la base."
-            )
-            st.dataframe(pd.DataFrame(resumen["sin_datos"]), hide_index=True)
-        st.download_button(
-            "⬇️ Descargar Listado de Beneficiarios",
-            data=listado_bytes,
-            file_name=f"Listado_Beneficiarios_{sufijo}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+    resultados = {
+        "etiqueta": etiqueta_muni,
+        "mes": nombre_mes,
+        "anio": anio,
+        "n_envios": len(envios),
+        "sufijo": f"{base_nombre}_{nombre_mes}_{anio}",
+        "todo_depto": todo_depto,
+        "listado": None,
+        "informe": None,
+    }
+    if envios:
+        if hacer_listado:
+            with st.spinner("Generando listado de beneficiarios..."):
+                participantes_idx = indexar_participantes(participantes_df)
+                nuevos_idx = registro_nuevos_miembros(submissions)
+                datos, resumen = generar_listado(envios, participantes_idx, nuevos_idx, choice_maps, field_lists, mes, anio)
+            resultados["listado"] = {"bytes": datos, "resumen": resumen}
+        if hacer_informe:
+            with st.spinner("Generando informe mensual..."):
+                promotores_idx = indexar_promotores(promotores_df)
+                datos, resumen = generar_informe(
+                    envios, promotores_idx, choice_maps, field_lists,
+                    None if todo_depto else municipio_code, mes, anio,
+                )
+            resultados["informe"] = {"bytes": datos, "resumen": resumen}
+    st.session_state["resultados"] = resultados
 
-    if hacer_informe:
-        with st.spinner("Generando informe mensual..."):
-            promotores_idx = indexar_promotores(promotores_df)
-            informe_bytes, resumen = generar_informe(
-                envios, promotores_idx, choice_maps, field_lists,
-                None if todo_depto else municipio_code, mes, anio,
-            )
-        st.subheader("📊 Informe Mensual")
-        if resumen["eventos"] == 0:
-            st.warning("Ninguna boleta de este mes tiene la sección de informe llenada (pregunta 'informe' = Sí). El archivo saldrá con la sección vacía.")
-        elif todo_depto:
-            st.markdown(f"**{resumen['eventos']}** eventos en las secciones de todos los municipios")
-        else:
-            st.markdown(f"**{resumen['eventos']}** eventos en la sección de **{etiqueta_muni}**")
-        for adv in resumen["advertencias"]:
-            st.warning("⚠️ " + adv)
-        st.download_button(
-            "⬇️ Descargar Informe Mensual",
-            data=informe_bytes,
-            file_name=f"Informe_Mensual_{sufijo}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+res = st.session_state.get("resultados")
+if res is not None:
+    st.divider()
+    if res["n_envios"] == 0:
+        st.warning(
+            f"No se encontraron envíos de **{res['etiqueta']}** en **{res['mes']} {res['anio']}**. "
+            "Revise el municipio, el mes y que las boletas ya estén enviadas en Kobo."
         )
+    else:
+        st.success(f"Se encontraron **{res['n_envios']}** boletas de **{res['etiqueta']}** en **{res['mes']} {res['anio']}**.")
+
+        if res["listado"] is not None:
+            resumen = res["listado"]["resumen"]
+            st.subheader("📋 Listado de Beneficiarios")
+            detalle = " · ".join(f"{hoja}: {n}" for hoja, n in resumen["por_hoja"].items())
+            st.markdown(f"**{resumen['beneficiarios']}** beneficiarios en **{resumen['eventos']}** eventos ({detalle})")
+            if resumen["sin_datos"]:
+                st.warning(
+                    f"⚠️ {len(resumen['sin_datos'])} CUI(s) no aparecen en la base de participantes. "
+                    "Salen en el listado solo con su CUI; complete sus datos a mano o actualice la base."
+                )
+                st.dataframe(pd.DataFrame(resumen["sin_datos"]), hide_index=True)
+            st.download_button(
+                "⬇️ Descargar Listado de Beneficiarios",
+                data=res["listado"]["bytes"],
+                file_name=f"Listado_Beneficiarios_{res['sufijo']}.xlsx",
+                mime=MIME_XLSX,
+                key="dl_listado",
+            )
+
+        if res["informe"] is not None:
+            resumen = res["informe"]["resumen"]
+            st.subheader("📊 Informe Mensual")
+            if resumen["eventos"] == 0:
+                st.warning("Ninguna boleta de este mes tiene la sección de informe llenada (pregunta 'informe' = Sí). El archivo saldrá con la sección vacía.")
+            elif res["todo_depto"]:
+                st.markdown(f"**{resumen['eventos']}** eventos en las secciones de todos los municipios")
+            else:
+                st.markdown(f"**{resumen['eventos']}** eventos en la sección de **{res['etiqueta']}**")
+            for adv in resumen["advertencias"]:
+                st.warning("⚠️ " + adv)
+            st.download_button(
+                "⬇️ Descargar Informe Mensual",
+                data=res["informe"]["bytes"],
+                file_name=f"Informe_Mensual_{res['sufijo']}.xlsx",
+                mime=MIME_XLSX,
+                key="dl_informe",
+            )
+
+        if res["listado"] is not None and res["informe"] is not None:
+            st.caption("Puede descargar los dos archivos, uno después del otro — los botones no desaparecen.")
